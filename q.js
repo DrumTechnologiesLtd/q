@@ -246,11 +246,11 @@ var array_reduce = uncurryThis(
 );
 
 var array_isArray = Array.isArray || function (object) {
-    return object_toString(object) == "[object Array]";
+    return object_toString(object) === "[object Array]";
 };
 
 var array_isArguments = function (object) {
-    return object_toString(object) == "[object Arguments]";
+    return object_toString(object) === "[object Arguments]";
 };
 
 var array_indexOf = uncurryThis(
@@ -1223,36 +1223,6 @@ function spawn(makeGenerator) {
     done(async(makeGenerator)());
 }
 
-// FIXME: Remove this interface once ES6 generators are in SpiderMonkey.
-/**
- * Throws a ReturnValue exception to stop an asynchronous generator.
- *
- * This interface is a stop-gap measure to support generator return
- * values in older Firefox/SpiderMonkey.  In browsers that support ES6
- * generators like Chromium 29, just use "return" in your generator
- * functions.
- *
- * @param value the return value for the surrounding generator
- * @throws ReturnValue exception with the value.
- * @example
- * // ES6 style
- * Q.async(function* () {
- *      var foo = yield getFooPromise();
- *      var bar = yield getBarPromise();
- *      return foo + bar;
- * })
- * // Older SpiderMonkey style
- * Q.async(function () {
- *      var foo = yield getFooPromise();
- *      var bar = yield getBarPromise();
- *      Q.return(foo + bar);
- * })
- */
-Q["return"] = _return;
-function _return(value) {
-    throw new QReturnValue(value);
-}
-
 /**
  * The promised function decorator ensures that any promise arguments
  * are settled and passed as values (`this` is also settled and passed
@@ -1464,7 +1434,6 @@ function all(promises) {
  */
 Q.reduce = reduce;
 function reduce(promises, callback, basis) {
-    var length = arguments.length;
     basis = Q(basis);
     return Q(promises).then(function (promises) {
         var countDown = 0;
@@ -1486,15 +1455,15 @@ function reduce(promises, callback, basis) {
                     Q(iteration.value)
                     .then(function (value) {
                         basis = basis.then(function (basis) {
-                            basis = fcall(callback, basis, value, index)
-                            ++index;
-                            --countDown;
+                            basis = fcall(callback, basis, value, index);
+                            index += 1;
+                            countDown -= 1;
                             if (countDown === 0 && done) {
                                 deferred.resolve(basis);
                             }
                             return basis;
 
-                        })
+                        });
                     })
                     .then(null, deferred.reject);
                     next();
@@ -1549,13 +1518,15 @@ function map(promises, callback) {
 Q.forEach = forEach;
 function forEach(source, callback, parallelism) {
 
-    if (parallelism === void 0)
+    if (parallelism === void 0) {
         parallelism = 1;
+    }
 
     // initialize the semaphore
     var semaphore = Queue();
-    for (var i = 0; i < parallelism; i++)
+    for (var i = 0; i < parallelism; i++) {
         semaphore.put();
+    }
 
     return Q(source).then(function (source) {
         source = iterate(source);
