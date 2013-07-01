@@ -245,6 +245,14 @@ var array_reduce = uncurryThis(
     }
 );
 
+var array_isArray = Array.isArray || function (object) {
+    return object_toString(object) == "[object Array]";
+};
+
+var array_isArguments = function (object) {
+    return object_toString(object) == "[object Arguments]";
+};
+
 var array_indexOf = uncurryThis(
     Array.prototype.indexOf || function (value) {
         // not a very good shim, but good enough for our one use of it
@@ -292,41 +300,58 @@ function isObject(value) {
     return value === Object(value);
 }
 
-// generator related shims
+// iterator related shims
 
-// FIXME: Remove this function once ES6 generators are in SpiderMonkey.
-function isStopIteration(exception) {
-    return (
-        object_toString(exception) === "[object StopIteration]" ||
-        exception instanceof QReturnValue
-    );
+function iterate(values) {
+    if (array_isArray(values) || array_isArguments(values)) {
+        return array_iterate(values);
+    } else if (typeof values.iterator === "function") {
+        return values.iterator();
+    } else if (typeof values.next === "function") {
+        return values;
+    } else {
+        throw new Error("Can't iterate: " + values);
+    }
 }
 
-// FIXME: Remove this helper and Q.return once ES6 generators are in
-// SpiderMonkey.
-var QReturnValue;
-if (typeof ReturnValue !== "undefined") {
-    QReturnValue = ReturnValue;
-} else {
-    QReturnValue = function (value) {
-        this.value = value;
-    };
+function array_iterate(values) {
+    var i = 0;
+    function next() {
+        while (i < values.length && !(i in values)) {
+            i++;
+        }
+        if (i < values.length) {
+            return {value: values[i++]};
+        } else {
+            return {done: true};
+        }
+    }
+    return {next: next, send: next};
 }
 
-// Until V8 3.19 / Chromium 29 is released, SpiderMonkey is the only
-// engine that has a deployed base of browsers that support generators.
-// However, SM's generators use the Python-inspired semantics of
-// outdated ES6 drafts.  We would like to support ES6, but we'd also
-// like to make it possible to use generators in deployed browsers, so
-// we also support Python-style generators.  At some point we can remove
-// this block.
-var hasES6Generators;
-try {
-    /* jshint evil: true, nonew: false */
-    new Function("(function* (){ yield 1; })");
-    hasES6Generators = true;
-} catch (e) {
-    hasES6Generators = false;
+function iterable_reduce(iterable, callback, basis) {
+    if (array_isArray(iterable) || array_isArguments(iterable)) {
+        if (arguments.length === 2) {
+            return array_reduce(iterable, callback);
+        } else {
+            return array_reduce(iterable, callback, basis);
+        }
+    } else if (typeof iterable.iterator === "function") {
+        var iterator = iterable.iterator();
+        if (arguments.length === 2) {
+            basis = iterator.next();
+        }
+        while (true) {
+            var result = iterable.next();
+            if (result.done) {
+                return basis;
+            } else {
+                basis = callback(basis, result.value);
+            }
+        }
+    } else {
+        throw new Error("Can't reduce non-iterable: " + iterable);
+    }
 }
 
 // long stack traces
@@ -788,7 +813,7 @@ array_reduce(
         "keys",
         "fapply", "fcall", "fbind",
         "all", "allResolved",
-        "map",
+        "map", "reduce", "forEach",
         "timeout", "delay",
         "catch", "finally", "fail", "fin", "progress", "done",
         "nfcall", "nfapply", "nfbind", "denodeify", "nbind",
@@ -1135,13 +1160,6 @@ function spread(promise, fulfilled, rejected) {
     }, rejected);
 }
 
-Q.map = map;
-function map(promise, callback, fulfilled, rejected) {
-    return when(promise, function (valuesOrPromises) {
-        return all(valuesOrPromises.map(callback));
-    }, rejected);
-}
-
 /**
  * The async function is a decorator for generator functions, turning
  * them into asynchronous generators.  Although generators are only part
@@ -1175,29 +1193,15 @@ function async(makeGenerator) {
         // when verb is "throw", arg is an exception
         function continuer(verb, arg) {
             var result;
-            if (hasES6Generators) {
-                try {
-                    result = generator[verb](arg);
-                } catch (exception) {
-                    return reject(exception);
-                }
-                if (result.done) {
-                    return result.value;
-                } else {
-                    return when(result.value, callback, errback);
-                }
+            try {
+                result = generator[verb](arg);
+            } catch (exception) {
+                return reject(exception);
+            }
+            if (result.done) {
+                return result.value;
             } else {
-                // FIXME: Remove this case when SM does ES6 generators.
-                try {
-                    result = generator[verb](arg);
-                } catch (exception) {
-                    if (isStopIteration(exception)) {
-                        return exception.value;
-                    } else {
-                        return reject(exception);
-                    }
-                }
-                return when(result, callback, errback);
+                return when(result.value, callback, errback);
             }
         }
         var generator = makeGenerator.apply(this, arguments);
@@ -1216,7 +1220,7 @@ function async(makeGenerator) {
  */
 Q.spawn = spawn;
 function spawn(makeGenerator) {
-    Q.done(Q.async(makeGenerator)());
+    done(async(makeGenerator)());
 }
 
 // FIXME: Remove this interface once ES6 generators are in SpiderMonkey.
@@ -1419,7 +1423,7 @@ function all(promises) {
     return when(promises, function (promises) {
         var countDown = 0;
         var deferred = defer();
-        array_reduce(promises, function (undefined, promise, index) {
+        iterable_reduce(promises, function (undefined, promise, index) {
             var snapshot;
             if (
                 isPromise(promise) &&
@@ -1439,6 +1443,145 @@ function all(promises) {
         if (countDown === 0) {
             deferred.resolve(promises);
         }
+        return deferred.promise;
+    });
+}
+
+
+/**
+ * Aggregates all of the values from a source until all of them have been
+ * combined and returns that value, asynchronously.  This version of `reduce`
+ * does not care about the order in which the source promises are fulfilled.
+ * The source can also be an iterator of indeterminite length.
+ * @param {Iterable*} source an iterable (albeit an array, queue, iterator,
+ * iterable, generator) (or a promise for such)
+ * @param {Function} callback a function that accepts a current aggregate value
+ * (or the basis) and a fulfilled value from the source and returns the new
+ * aggregate value (or a promise for such).
+ * @param {Any} basis the initial aggregate value (or a promise for such).
+ * Unlike other reduce methods, the basis is not optional.  If you need an
+ * optional basis, handle an undefined aggregate value in the aggregator.
+ */
+Q.reduce = reduce;
+function reduce(promises, callback, basis) {
+    var length = arguments.length;
+    basis = Q(basis);
+    return Q(promises).then(function (promises) {
+        var countDown = 0;
+        var done = false;
+        var deferred = defer();
+        var iterator = Q(iterate(promises));
+        var index = 0;
+
+        function next() {
+            iterator.invoke("next")
+            .then(function (iteration) {
+                if (iteration.done) {
+                    done = true;
+                    if (countDown === 0) {
+                        deferred.resolve(basis);
+                    }
+                } else {
+                    ++countDown;
+                    Q(iteration.value)
+                    .then(function (value) {
+                        basis = basis.then(function (basis) {
+                            basis = fcall(callback, basis, value, index)
+                            ++index;
+                            --countDown;
+                            if (countDown === 0 && done) {
+                                deferred.resolve(basis);
+                            }
+                            return basis;
+
+                        })
+                    })
+                    .then(null, deferred.reject);
+                    next();
+                }
+            })
+            .then(null, deferred.reject);
+        }
+
+        next();
+
+        return deferred.promise;
+    });
+}
+
+/**
+ * Accepts a source of promises and returns a promise for an array of promises.
+ * When each promise from the source is fulfilled, it is passed through the
+ * callback to produce the corresponding promise in the returned array.
+ * @param {Iterable*} source an iterable (albeit an array) (or a promise for
+ * such) that
+ * @param {Function} callback a relation from the inputs to the outputs
+ * @returns {Array*} a promise for an array of promises for the respective
+ * outputs
+ */
+Q.map = map;
+function map(promises, callback) {
+    return Q(promises).then(function (promises) {
+        var values = [];
+        iterable_reduce(promises, function (undefined, promise, index) {
+            values[index] = Q(promise).then(function (value) {
+                return fcall(callback, value, index);
+            });
+        }, void 0);
+        return values;
+    });
+}
+
+/**
+ * Accepts a source of promises and returns a promise to send the corresponding
+ * values to the given callback, serially.  `forEach` waits for the returned
+ * promise from the previous callback before sending the next value, or sends a
+ * number of values out in parallel, as dictated by the `parallism` argument.
+ * @param {Iterable*} source an iterable (albeit an array, queue, iterator,
+ * generator) (or a promise for such) that produces a sequence of values (or
+ * promises for values)
+ * @param {Function} callback a function to call with each value, which returns
+ * undefined (or a promise for undefined when the callback has completed its
+ * work)
+ * @param {Number} paralellism the number of unresolved promises to allow to
+ * run in parallel.
+ */
+Q.forEach = forEach;
+function forEach(source, callback, parallelism) {
+
+    if (parallelism === void 0)
+        parallelism = 1;
+
+    // initialize the semaphore
+    var semaphore = Queue();
+    for (var i = 0; i < parallelism; i++)
+        semaphore.put();
+
+    return Q(source).then(function (source) {
+        source = iterate(source);
+        var deferred = defer();
+
+        function next() {
+            semaphore.get().then(function () {
+                var result = source.next();
+                return Q(result).then(function (result) {
+                    deferred.notify();
+                    if (result.done) {
+                        deferred.resolve(result.value);
+                    } else {
+                        next();
+                        return Q(result.value)
+                        .then(function (value) {
+                            return fcall(callback, value);
+                        })
+                        .then(semaphore.put, deferred.reject);
+                    }
+                });
+            });
+        }
+
+        next();
+
         return deferred.promise;
     });
 }
@@ -1760,6 +1903,66 @@ function nodeify(promise, nodeback) {
 
 // All code before this point will be filtered from stack traces.
 var qEndingLine = captureLine();
+
+Q.Queue = Queue;
+function Queue() {
+    var ends = Q.defer();
+    var closed = Q.defer();
+    var queue = object_create(Queue.prototype);
+    queue.put = function (value) {
+        var next = Q.defer();
+        ends.resolve({
+            head: value,
+            tail: next.promise
+        });
+        ends.resolve = next.resolve;
+    };
+    queue.get = function () {
+        var result = ends.promise.get("head");
+        ends.promise = ends.promise.get("tail");
+        return result.fail(function (error) {
+            closed.resolve(error);
+            throw error;
+        });
+    };
+    return queue;
+}
+
+Queue.prototype.next = function () {
+    return this.get();
+};
+
+Queue.prototype.send = function (value) {
+    return this.put({value: value});
+};
+
+Queue.prototype["return"] = function (value) {
+    this.put({value: value, done: true});
+};
+
+Queue.prototype["throw"] = function (error) {
+    this.put(Q.reject(error));
+};
+
+Queue.prototype.iterator = function () {
+    return this;
+};
+
+Queue.prototype.map = function (callback, basis) {
+    return Q(this).map(callback, basis);
+};
+
+Queue.prototype.reduce = function (callback, basis) {
+    return Q(this).reduce(callback, basis);
+};
+
+Queue.prototype.forEach = function (callback, parallelism) {
+    return Q(this).forEach(callback, parallelism);
+};
+
+Queue.prototype.all = function () {
+    return Q(this).all();
+};
 
 return Q;
 

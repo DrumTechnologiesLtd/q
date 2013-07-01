@@ -10,6 +10,8 @@ if (typeof Q === "undefined" && typeof require !== "undefined") {
     require("./lib/jasmine-promise");
 }
 
+Q.longStackSupport = true;
+
 var REASON = "this is not an error, but it might show up in the console";
 
 // In browsers that support strict mode, it'll be `undefined`; otherwise, the global.
@@ -1250,6 +1252,7 @@ describe("map", function () {
         return Q.map(['one', 'two', 'three'], function(s) {
             return s.length;
         })
+        .all()
         .then(function(lengths) {
             expect(lengths[0]).toBe(3);
             expect(lengths[1]).toBe(3);
@@ -1269,6 +1272,92 @@ describe("map", function () {
             throw new Error('then handler should not run')
         }, function () {
         })
+    });
+
+});
+
+describe("reduce", function () {
+
+    it("should map reduce", function () {
+        return Q([1, 2, 3])
+        .map(function (n) {
+            return Q(n).delay(n * 10)
+        })
+        .map(function (m) {
+            return m * 2;
+        })
+        .reduce(function (a, b) {
+            return a + b;
+        }, 0)
+        .then(function (sum) {
+            expect(sum).toBe(12);
+        });
+    });
+
+});
+
+describe("forEach", function () {
+    it("should forEach", function () {
+        var n = 1;
+        return Q([1, 2, 3])
+        .forEach(function (v) {
+            expect(n++).toEqual(v);
+        })
+        .then(function (value) {
+            expect(value).toBe(void 0);
+        });
+    });
+
+    it("should send multiple", function () {
+        var deferred = Q.defer();
+
+        var progress = 0;
+
+        Q([1, 2, 3, 4, 5, 6])
+        .forEach(function (v) {
+            progress++;
+            return Q.delay(100);
+        }, 3)
+        .then(deferred.resolve, deferred.reject);
+
+        Q()
+        .delay(50)
+        .then(function () {
+            expect(progress).toBe(3);
+        })
+        .delay(100)
+        .then(function () {
+            expect(progress).toBe(6);
+        })
+        .delay(100)
+        .then(function () {
+            expect(deferred.promise.inspect())
+                .toEqual({
+                    state: "fulfilled",
+                    value: undefined
+                })
+        })
+        .thenResolve(deferred.promise);
+    });
+
+});
+
+describe("queue", function () {
+
+    it("should emulate a generator with forEach", function () {
+        var queue = Q.Queue();
+        var n = 0;
+        queue.send(0);
+        queue.send(1);
+        queue.send(2);
+        queue.return(10);
+        return queue.forEach(function (value) {
+            expect(value).toBe(n++);
+        })
+        .then(function (result) {
+            expect(result).toBe(10);
+            expect(n).toBe(3);
+        });
     });
 
 });
